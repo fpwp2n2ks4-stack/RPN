@@ -85,6 +85,154 @@ test_stdout "drop"    "1 drop 42"       "42"
 test_stdout "swap"    "1 2 swap"        "1"
 test_stdout "clear"   "1 2 3 clear 99"  "99"
 
+echo "=== LAST X (registre HP-15C) ==="
+test_stdout "lastx binaire"      "2 3 * lastx"                                "3"
+test_stdout "lastx unaire"       "5 neg lastx"                                "5"
+test_stdout "lastx divmod (~)"   "17 5 ~ lastx"                               "5"
+test_stdout "lastx conversion"   "7 kg2lb lastx"                              "7"
+test_stdout "lastx accumulateur" "9 m+ lastx"                                 "9"
+test_stdout "alias lstx"         "10 4 / lstx"                                "4"
+test_stdout "lastx non consommé" $'8 2 /\nlastx\nlastx'                      "2"
+test_stdout "lastx exact (BigInt)" \
+    "123456789123456789123456789 888888888888888888888888888888 mod lastx" \
+    "888888888888888888888888888888"
+test_stderr  "lastx sans opération"  "lastx"            "pas encore de LAST X"
+test_stderr  "swap ne nourrit pas LAST X" "2 3 swap lastx" "pas encore de LAST X"
+
+echo "=== Pourcentages HP (pct, d%, %t) ==="
+test_stdout "pct : 5 pourcents de 200" "200 5 pct"        "10"
+test_stdout "pct garde la référence"   "200 5 pct +"      "210"
+test_stdout "d% : variation"           "80 100 d%"        "25"
+test_stdout "d% : variation négative"  "100 80 d%"        "-20"
+test_stdout "%t : part du total"      "200 50 %t"        "25"
+test_stdout "pct nourrit LAST X"      "200 5 pct lastx"  "5"
+test_stdout "pct sans division (réf. 0)" "0 5 pct"       "0"
+test_stderr "d% référence nulle"      "0 50 d%"          "référence nulle"
+test_stderr "%t référence nulle"      "0 50 %t"          "référence nulle"
+test_stdout "% reste le modulo (dc)"  "17 5 %"           "2"
+
+echo "=== Modes d'affichage sci/eng (todo §0.3) ==="
+test_stdout "saisie scientifique (EEX)"   "1.5e3"                              "1500"
+test_stdout "saisie exposant négatif"     "1e-2"                               "0.01"
+test_stdout "affichage scientifique"      $'.6 sci\n12345'                     "1.2345e+4"
+test_stdout "sci exposant négatif"        $'.6 sci\n-0.00042'                  "-4.2e-4"
+test_stdout "sci zéro"                    $'.6 sci\n0'                        "0"
+test_stdout "affichage ingénieur"         $'.6 eng\n0.0123'                   "12.3e-3"
+test_stdout "eng exposant multiple de 3"  $'.6 eng\n12345'                    "12.345e+3"
+test_stdout "eng petite valeur"           $'.6 eng\n0.0005'                   "500e-6"
+test_stdout "eng arrondi renormalisé"     $'.2 eng\n999999'                   "1e+6"
+test_stdout "retour au décimal"           $'.6 sci\n3.5\ndec\n2.5'            "2.5"
+test_stdout "sci promeut le BigInt"       $'.6 sci\n123456789123456789123456789' "1.23457e+26"
+
+echo "=== Alias de frappe HP-15C (todo §0.4) ==="
+test_stdout "alias 1/x"        "4 1/x"        "0.25"
+test_stdout "alias y^x"        "2 10 y^x"     "1024"
+test_stdout "alias x<>y"       "1 2 x<>y"     "1"
+test_stdout "alias x↔y"        "1 2 x↔y"      "1"
+test_stdout "alias chs"        "5 chs"        "-5"
+test_stdout "alias e^x"        "1 e^x"        "2.718281828"
+test_stdout "alias nourrit LAST X" "5 chs lastx" "5"
+test_stderr "1/x par zéro"     "0 1/x"        "division par zéro"
+
+echo "=== Séparateur « ; » — retour chariot virtuel (todo §12) ==="
+test_stdout "segments enchaînés"        "3 4 + ; 2 *"        "14"
+test_stdout "écho de chaque segment"    "5 ; 7"              "7"
+test_stdout "segment final soldé"       "8 2 / ;"            "4"
+test_stdout "«;;» sans double écho"     $'4 ; ;\n6'          "6"
+test_stdout "«;» seul ne fait rien"      $';\n3'              "3"
+test_stdout "quit arrête la ligne"      "5 quit ; 3"         "5"
+test_stdout "sto traverse le séparateur" $'42 sto ; x\nrcl x' "42"
+test_history "historique par segment"   "8 2 / ;"            "8 2 /"
+
+echo "=== Notation collée — frappes sans Entrée (todo §12) ==="
+test_stdout "collé : 5;3+"             "5;3+"                 "8"
+test_stdout "collé : addition"          "8 3+"                 "11"
+test_stdout "collé : soustraction"       "12 5-"               "7"
+test_stdout "collé : négatif"            "-5 3-"                "-8"
+test_stdout "collé : tiret = soustraction" "8 3-2"             "2"
+test_stdout "collé : puissance"           "2 10^"               "1024"
+test_stdout "collé : modulo"              "10 3%"               "1"
+test_stdout "collé : division"            "8 2/"                "4"
+test_stdout "collé nourrit LAST X"        "5 3+ lastx"          "3"
+test_stdout "collé : accumulateur"        $'9 5m+\nmr'           "5"
+test_stdout "collé : BigInt exact"        "999999999999999999999999 1+" "1000000000000000000000000"
+test_stderr "sto refuse le collage"       "42 sto5"             "commande inconnue"
+
+echo "=== Sauvegarde / chargement explicites (todo §1) ==="
+test_stdout "save puis load restaure"  $'5 sto sv1\nsave\n9 sto sv1\nload\nrcl sv1' "5"
+test_stdout "alias savevar/loadvar"    $'5 sto sv1\nsavevar\nloadvar\nrcl sv1'      "5"
+
+echo "=== Persistance JSON (todo §2) ==="
+printf '7777 sto svj\nquit\n' | "$RPN" >/dev/null 2>&1
+if grep -q '"svj": {"type": "b"' .rpn_data/variables.txt; then
+    echo "  ✓ format JSON écrit"; ((PASS++))
+else
+    echo "  ✗ format JSON : entrée svj absente de variables.txt"; ((FAIL++))
+fi
+test_stdout "JSON : retour de session (BigInt)" "rcl svj" "7777"
+printf '0.1 0.2 + sto svd\nquit\n' | "$RPN" >/dev/null 2>&1
+test_stdout "JSON : aller-retour double" $'.18\nrcl svd' "0.300000000000000044"
+
+echo "=== run <fichier> (todo §3) ==="
+SCRIT=/tmp/rpn_script_$$.rpn
+printf '3 4 +\n5 *\n' > "$SCRIT"
+test_stdout "run exécute le script"    "run $SCRIT"       "35"
+printf '# entête\n1 0 /\n7 7* # collé-commenté\n' > "$SCRIT"
+test_stdout "run continue après erreur" "run $SCRIT"      "49"
+test_stderr "run : l'erreur remonte"     "run $SCRIT"      "division par zéro"
+printf '10 sto rjj\n' > "$SCRIT"
+test_stdout "run : variables persistées" "run $SCRIT
+rcl rjj" "10"
+test_stderr "run : fichier absent"       "run /tmp/nexiste_pas_$$.rpn" "impossible d'ouvrir"
+
+echo "=== Fichiers en argument (todo §4) ==="
+F1=/tmp/rpn_b1_$$.rpn; F2=/tmp/rpn_b2_$$.rpn
+printf '10\n' > "$F1"; printf '4 +\n' > "$F2"
+trouve=$("$RPN" "$F1" "$F2" 2>/dev/null | tail -1)
+if [[ "$trouve" == "14" ]]; then echo "  ✓ séquence, pile persistante"; ((PASS++)); else echo "  ✗ attendu 14, obtenu '$trouve'"; ((FAIL++)); fi
+err=$("$RPN" /tmp/manquant_$$.rpn 2>&1 >/dev/null)
+if echo "$err" | grep -qi "impossible d'ouvrir"; then echo "  ✓ fichier absent signalé"; ((PASS++)); else echo "  ✗ aucune erreur d'ouverture"; ((FAIL++)); fi
+rm -f "$SCRIT" "$F1" "$F2"
+
+echo "=== Commentaires (todo §5) ==="
+test_stdout "commentaire #"             "3 4 + # somme"       "7"
+test_stdout "commentaire //"            "6 7* // produit"      "42"
+test_stdout "collé puis commentaire"    "8 2/ # division"    "4"
+test_stdout "// coupe avant / collé"    "8 2// seuil"         "2"
+
+echo "=== Mode debug (todo §8) ==="
+test_stdout "debug : le résultat reste"   $'debug\n5 3+'       "8"
+if printf 'debug\n5 3+\nquit\n' | "$RPN" 2>/dev/null | grep -c '\[DEBUG\]' > /dev/null; then
+    echo "  ✓ trace [DEBUG] par token"; ((PASS++))
+else
+    echo "  ✗ aucune trace [DEBUG]"; ((FAIL++))
+fi
+if printf 'debug\n2 0 /\nquit\n' | "$RPN" 2>&1 | grep -c '\[DEBUG\] « / »' > /dev/null; then
+    echo "  ✓ contexte d'erreur tracé (pile au moment du token)"; ((PASS++))
+else
+    echo "  ✗ le token fautif n'est pas tracé"; ((FAIL++))
+fi
+printf '5 3+\n' > /tmp/rpn_dbg_$$.rpn
+if "$RPN" --debug /tmp/rpn_dbg_$$.rpn 2>/dev/null | grep -c '\[DEBUG\]' > /dev/null; then
+    echo "  ✓ option --debug (fichier en argument)"; ((PASS++))
+else
+    echo "  ✗ --debug silencieux"; ((FAIL++))
+fi
+rm -f /tmp/rpn_dbg_$$.rpn
+der=$(printf 'debug\ndebug\n5 3+\nquit\n' | "$RPN" 2>/dev/null | tail -1)
+if [[ "$der" == "8" ]]; then
+    echo "  ✓ debug s'éteint (bascule)"; ((PASS++))
+else
+    echo "  ✗ la bascule debug ne coupe pas les traces (dernier: '$der')"; ((FAIL++))
+fi
+
+echo "=== Historique : effacement (todo §7) ==="
+if ! printf '41 1 +\nhclear\nh\nquit\n' | "$RPN" 2>/dev/null | grep -q '41 1 +'; then
+    echo "  ✓ hclear vide l'historique"; ((PASS++))
+else
+    echo "  ✗ l'entrée 41 1 + survit"; ((FAIL++))
+fi
+
 echo "=== Mémoire ==="
 test_stdout "sto puis rcl"        $'42 sto x\nrcl x'          "42"
 test_stdout "variables nommées"   $'3.14 sto pi2\nrcl pi2'    "3.14"

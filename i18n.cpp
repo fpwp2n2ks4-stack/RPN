@@ -48,9 +48,15 @@ const std::unordered_map<std::string, std::array<const char*, 3>>& catalog() {
         {"Cannot swap: need 2 elements (have %d)",
          {"Cannot swap: need 2 elements (have %d)", "impossible d'échanger, besoin de 2 éléments (disponible %d)", "no se puede intercambiar, se necesitan 2 elementos (hay %d)"}},
         {"Stack is empty",           {"Stack is empty", "pile vide", "pila vacía"}},
+        {"Percent: reference is zero",
+         {"Percent: reference is zero", "pourcentage : référence nulle", "porcentaje: referencia nula"}},
+        {"No LAST X yet",            {"No LAST X yet", "pas encore de LAST X", "todavía no hay LAST X"}},
         {"(empty)",                   {"(empty)", "(vide)", "(vacía)"}},
         {"Memory",                    {"memory", "mémoire", "memoria"}},
         {"Visual mode",               {"visual mode", "mode visuel", "modo visual"}},
+        {"Debug mode",                {"debug mode", "mode debug", "modo de depuración"}},
+        {"history cleared",
+         {"history cleared", "historique vidé", "historial vaciado"}},
         {"Angle mode",                {"Angle mode", "mode angle", "modo de ángulo"}},
         {"Display mode",              {"Display mode", "mode d'affichage", "modo de visualización"}},
         {"Unknown command",           {"unknown command", "commande inconnue", "comando desconocido"}},
@@ -91,8 +97,24 @@ const std::unordered_map<std::string, std::array<const char*, 3>>& catalog() {
         {"StackC",                    {"Stack", "Pile", "Pila"}},
         {"MemoryC",                   {"Memory", "Mémoire", "Memoria"}},
         {"VariablesC",                {"Variables", "Variables", "Variables"}},
+        {"ScriptC",                   {"Script", "Script", "Guion"}},
+        {"CommentC",                  {"Comments", "Commentaires", "Comentarios"}},
+        {"Variables saved in file",
+         {"variables saved in file", "variables sauvegardées dans le fichier", "variables guardadas en el archivo"}},
+        {"Variables reloaded",
+         {"variables reloaded", "variables rechargées", "variables recargadas"}},
+        {"Cannot open file: %s",
+         {"cannot open file: %s", "impossible d'ouvrir le fichier : %s", "no se puede abrir el archivo: %s"}},
+        {"run: %s — %d lines",
+         {"run: %s — %d lines", "run : %s — %d lignes", "run: %s — %d líneas"}},
+        {"run requires a file name",
+         {"run requires a file name", "run exige un nom de fichier", "run requiere un nombre de archivo"}},
+        {"run: nesting too deep",
+         {"run: nesting too deep", "run : imbrication trop profonde", "run: anidamiento demasiado profundo"}},
         {"Conversions",               {"Conversions", "Conversions", "Conversiones"}},
         {"Modes",                     {"Modes", "Modes", "Modos"}},
+        {"SeparatorC",    {"Separator", "Séparateur", "Separador"}},
+        {"(virtual Enter)",           {"(virtual Enter)", "(Entrée virtuelle)", "(Entrada virtual)"}},
         {"Angles",                    {"Angles", "Angles", "Ángulos"}},
         {"Control",                    {"Control", "Contrôle", "Control"}},
         {"HistoryC",                  {"History", "Historique", "Historial"}},
@@ -123,6 +145,13 @@ void i18n_init(int argc, char* argv[]) {
 
 Lang lang_current() { return g_lang; }
 
+// Force la langue des messages — utilisé par la façade C ABI (Swift) où il
+// n'y a pas de ligne de commande : "en", "fr", "es" ("fr_FR.UTF-8" accepté).
+void i18n_set(const char* lang) {
+    if (!lang) { g_lang = detect(); return; }
+    g_lang = lang_from_string(lang);
+}
+
 const char* lang_name(Lang l) {
     switch (l) {
         case Lang::FR: return "français";
@@ -135,5 +164,5 @@ const char* T(const char* key) {
     const auto& cat = catalog();
     auto it = cat.find(key);
     if (it == cat.end()) return key;   // clé absente → l'anglais (la clé elle-même)
-    return it->second[static_cast<int>(g_lang)];
+    return it->second[static_cast<size_t>(g_lang)];   // indice non-signé (esprit MISRA)
 }

@@ -1,22 +1,77 @@
 #include "rpn.h"
 
-#include <iostream>
 #include <sstream>
 #include <fstream>
 #include <filesystem>
 #include <cmath>
 #include <charconv>
-#include <iomanip>
-#include <limits>
+#include <cstdio>
 #include <array>
-#include <unistd.h>
-#include <fcntl.h>
-#include <termios.h>
-#include <signal.h>
+#include <limits>
 
 // kPi/kE sont des macros POSIX, pas du C++23 strict — constantes propres.
 constexpr double kPi = 3.141592653589793;
 constexpr double kE  = 2.718281828459045;
+
+// Retire le commentaire d'une ligne (todo §5) : tout ce qui suit « # »
+// ou « // » s'ignore — les deux marqueurs au plus tôt gagnent, et « // »
+// se coupe avant un simple « / » collé (« 8 2// note » garde la division).
+std::string sans_commentaires(const std::string& s) {
+    size_t pos = s.find('#');
+    const size_t pos2 = s.find("//");
+    if (pos2 != std::string::npos && (pos == std::string::npos || pos2 < pos))
+        pos = pos2;
+    if (pos == std::string::npos) return s;
+    return s.substr(0, pos);
+}
+
+// —— JSON du fichier de variables (todo §2) : l'écriture est la nôtre,
+// la lecture aussi — stricte mais minimale ; tout écart fait retomber
+// l'appelant sur l'ancien format texte (rétrocompatibilité).
+struct LecteurJson {
+    const std::string& s;
+    size_t i = 0;
+    void blancs() {
+        while (i < s.size()
+               && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r'))
+            ++i;
+    }
+    bool prend(char c) {
+        blancs();   // nos propres écritures espaçent librement autour des signes
+        if (i < s.size() && s[i] == c) {
+            ++i;
+            return true;
+        }
+        return false;
+    }
+};
+
+std::string json_chaine(const std::string& s) {
+    std::string out = "\"";
+    for (char c : s) {
+        if (c == '\\' || c == '"') out += '\\';
+        out += c;                        // l'UTF-8 passe octet par octet
+    }
+    return out + "\"";
+}
+
+// Trace du mode debug (todo §8) : le token vient d'être traité, la
+// pile se dit entière — BigInt exact, double à 17 chiffres (la trace
+// est un outil, pas un affichage : pas de mode, pas de i18n).
+std::string trace_debug(const std::string& tok, const std::vector<Value>& pile) {
+    std::string out = "\u00ab " + tok + " \u00bb \u2192 pile(";
+    out += std::to_string(pile.size()) + "):";
+    for (size_t i = 0; i < pile.size(); ++i) {
+        out += ' ';
+        if (pile[i].is_big()) out += pile[i].bi->to_string();
+        else {
+            std::array<char, 32> buf{};
+            std::snprintf(buf.data(), buf.size(), "%.17g", pile[i].d);
+            out += buf.data();
+        }
+    }
+    return out;
+}
 
 // ============================================================
 // Constructeur — enregistrement des commandes
@@ -106,6 +161,8 @@ RPN::RPN() {
     reg("dup",   CmdCat::STACK, new Dup());
     reg("drop",  CmdCat::STACK, new Drop());
     reg("swap",  CmdCat::STACK, new Swap());
+    reg("lastx", CmdCat::STACK, new LastX());
+    reg("lstx",  CmdCat::STACK, new LastX());
     reg("clear", CmdCat::STACK, new Clear());
     reg("stack", CmdCat::STACK, new StackCmd());
     reg("ls",    CmdCat::STACK, new StackCmd());
@@ -127,6 +184,11 @@ RPN::RPN() {
     reg("%", CmdCat::ARITH, new BinaryOp([](double a, double b) {
         return b == 0.0 ? std::numeric_limits<double>::quiet_NaN() : std::fmod(a, b);
     }, "modulo par zéro", &big::mod));
+    // Pourcentages HP — la référence y reste sur la pile ; le `%` modulo
+    // (alias dc) ne bouge pas (todo.md §0.2, option B).
+    reg("pct", CmdCat::ARITH, new PercentOp(PercentOp::Kind::OF));       // x % de y
+    reg("d%",  CmdCat::ARITH, new PercentOp(PercentOp::Kind::CHANGE));    // Δ% : (x−y)/y×100
+    reg("%t",  CmdCat::ARITH, new PercentOp(PercentOp::Kind::TOTAL));     // %T : part de x dans y
     reg("~", CmdCat::ARITH, new DivmodOp());
 
     // Modes
@@ -136,10 +198,34 @@ RPN::RPN() {
     reg("dec",    CmdCat::MODE, new DisplaySetter(DisplayMode::DEC));
     reg("hex",    CmdCat::MODE, new DisplaySetter(DisplayMode::HEX));
     reg("bin",    CmdCat::MODE, new DisplaySetter(DisplayMode::BIN));
+    reg("sci",    CmdCat::MODE, new DisplaySetter(DisplayMode::SCI));
+    reg("eng",    CmdCat::MODE, new DisplaySetter(DisplayMode::ENG));
+    reg("debug",  CmdCat::MODE, new DebugToggle());     // mode debug (todo §8)
+
+    // Alias de frappe HP-15C (todo.md §0.4) : même comportement que les
+    // commandes longues, autres instances — le registre possède ses
+    // commandes par entrée (unique_ptr).
+    reg("1/x",  CmdCat::UNARY, new UnaryOp([](double x) {
+        return x == 0.0 ? std::numeric_limits<double>::quiet_NaN() : 1.0 / x;
+    }, "inv: division by zero"));
+    reg("chs",  CmdCat::UNARY, new UnaryOp([](double x) { return -x; },
+        "Result undefined (nan)", &big::neg));
+    reg("e^x",  CmdCat::UNARY, new UnaryOp([](double x) { return std::exp(x); }));
+    reg("y^x",  CmdCat::ARITH, new BinaryOp([](double a, double b) { return std::pow(a, b); },
+        "pow: undefined operation (negative base, non-integer exponent)", &big::pow_big));
+    reg("x<>y", CmdCat::STACK, new Swap());
+    reg("x↔y",  CmdCat::STACK, new Swap());
 
     // Variables nommées
     reg("sto", CmdCat::VAR, new StoRcl(true));
     reg("rcl", CmdCat::VAR, new StoRcl(false));
+
+    // Persistance explicite & scripts (todo §1-§5)
+    reg("save",    CmdCat::VAR, new SaveVars());
+    reg("savevar", CmdCat::VAR, new SaveVars());
+    reg("load",    CmdCat::VAR, new LoadVars());
+    reg("loadvar", CmdCat::VAR, new LoadVars());
+    reg("run",     CmdCat::VAR, new RunCmd());
 
     // Mémoire accumulateur
     reg("m+", CmdCat::MEM, new MemoryOp(MemOp::ADD));
@@ -151,17 +237,19 @@ RPN::RPN() {
     reg("ms", CmdCat::MEM, new MemShow());
 
     // Historique
-    reg("history", CmdCat::HIST, new HistoryCmd());
-    reg("hist",    CmdCat::HIST, new HistoryCmd());
-    reg("h",       CmdCat::HIST, new HistoryCmd());
+    reg("history",  CmdCat::HIST, new HistoryCmd());
+    reg("hist",     CmdCat::HIST, new HistoryCmd());
+    reg("h",        CmdCat::HIST, new HistoryCmd());
+    reg("hclear",   CmdCat::HIST, new HistClear());     // vide l'historique (todo §7)
+    reg("histclear", CmdCat::HIST, new HistClear());
 
     // Conversions d'unités
     reg("m2cm",  CmdCat::CONV, new UnitConv(100.0));
     reg("cm2m",  CmdCat::CONV, new UnitConv(0.01));
     reg("m2ft",  CmdCat::CONV, new UnitConv(3.28084));
     reg("ft2m",  CmdCat::CONV, new UnitConv(0.3048));
-    reg("kg2lb", CmdCat::CONV, new UnitConv(2.20462));
-    reg("lb2kg", CmdCat::CONV, new UnitConv(0.453592));
+    reg("kg2lb",  CmdCat::CONV, new UnitConv(2.20462));
+    reg("lb2kg",  CmdCat::CONV, new UnitConv(0.453592));
     reg("c2f", CmdCat::CONV, new UnaryOp([](double c){ return c * 9.0 / 5.0 + 32.0; }));
     reg("f2c", CmdCat::CONV, new UnaryOp([](double f){ return (f - 32.0) * 5.0 / 9.0; }));
     reg("c2k", CmdCat::CONV, new UnaryOp([](double c){ return c + 273.15; }));
@@ -175,177 +263,311 @@ RPN::RPN() {
 }
 
 // ============================================================
-// Boucle principale
+// Traitement d'une ligne — sorties structurées uniquement
 // ============================================================
 
-void RPN::run() {
-    load_history();
-    load_variables();
-
-    bool interactive = isatty(STDIN_FILENO);
-    is_interactive = interactive;
-    use_color = isatty(STDOUT_FILENO);
-    if (interactive) {
-        // Ctrl-C : handler vide sans SA_RESTART — le read() de la frappe
-        // revient en EINTR, et le flux normal sauvegarde historique +
-        // variables avant de quitter (même chemin que Ctrl-D).
-        struct sigaction sa{};
-        sa.sa_handler = [](int) {};
-        sigaction(SIGINT, &sa, nullptr);
-        prompt();
-    }
-
-    std::string line;
-    while (interactive ? read_line_interactive(line) : static_cast<bool>(std::getline(std::cin, line))) {
-        if (!line.empty()) {
-            if (interactive) std::cout << "\n";
-            process_line(line);
-        }
-        if (quit_requested) break;
-        if (interactive) prompt();
-    }
-    if (interactive) std::cout << "\n";
-    save_history();
-    save_variables();
-}
-
-// ============================================================
-// Traitement d'une ligne
-// ============================================================
-
-void RPN::process_line(const std::string& line) {
-    if (line.empty()) return;
+LineResult RPN::process_line(const std::string& line, bool record_history) {
+    LineResult res;
+    if (line.empty()) return res;
 
     if (line[0] == '!' && line.size() > 1 && line[1] != '!') {
-        // Échappement shell réservé au session interactive : un `!cmd` venu
+        // Échappement shell réservé à la session interactive : un `!cmd` venu
         // d'un pipe ou d'un fichier exécuterait du code sans accord utilisateur.
-        if (!is_interactive) { print_err(T("Shell escape (!) is only allowed in interactive sessions")); return; }
-        Context ctx{st, memory, history, visual_mode, deg_mode, disp_mode,
-                    precision, quit_requested, expect_var, var_name, use_color};
-        ShellExec(line.substr(1)).exec(ctx);
-        return;
+        // Le moteur ne l'exécute pas : il le remonte au front-end habilité.
+        if (!allow_shell) {
+            res.outputs.push_back(
+                out_err(T("Shell escape (!) is only allowed in interactive sessions")));
+            return res;
+        }
+        res.shell = line.substr(1);
+        return res;
     }
 
-    // Hors mode interactif, on n'a pas d'écho clavier : on imprime la ligne
-    // colorée. En interactif, la coloration live l'a déjà affichée.
-    if (use_color && !is_interactive) colorize(line);
+    // Commentaires en ligne (todo §5) : tout ce qui suit « # » ou « // »
+    // s'ignore, en frappe comme en script. Les « !cmd » restent entiers —
+    // le shell fait ses propres commentaires. Effet de bord assumé : un
+    // nom de variable contenant « # » ne s'écrit plus (la frappe espace).
+    std::string texte = sans_commentaires(line);
+    if (texte.empty()) { res.silent = true; return res; }
 
-    history.push_back(line);
-    if (static_cast<int>(history.size()) > HIST_MAX)
-        history.erase(history.begin());
-
-    std::istringstream iss(line);
-    std::string tok;
-    bool silent = false;
     Context ctx{st, memory, history, visual_mode, deg_mode, disp_mode,
-                precision, quit_requested, expect_var, var_name, use_color};
-    while (iss >> tok) silent = process_token(tok, ctx);
+                precision, quit_requested, expect_var, var_name, last_x,
+                save_requested, load_requested, expect_file,
+                debug_mode, clear_hist_requested};
 
-    if (expect_var) {
-        print_err(T("sto/rcl requires a variable name"));
-        expect_var = false;
-    }
-
-    if (!silent) display_result();
-}
-
-void RPN::display_result() const {
-    if (st.empty()) { std::cout << "(?)\n"; return; }
-    if (visual_mode) { print_stack(); return; }
-    print_num(st.back(), disp_mode, precision);
-    std::cout << "\n";
-}
-
-void RPN::print_stack() const {
-    print_stack_lines(st, disp_mode, precision,
-                      use_color ? C::GRAY : "", use_color ? C::RESET : "");
-}
-
-void RPN::prompt() const { std::cout << C::CYAN << C::BOLD << "rpn" << C::RESET << C::DIM << ">" << C::RESET << " " << std::flush; }
-
-std::string RPN::cat_color(CmdCat cat) const {
-    switch (cat) {
-        case CmdCat::ARITH:
-        case CmdCat::CONSTANT:
-        case CmdCat::VAR:    return std::string(C::YELLOW) + C::BOLD;
-        case CmdCat::UNARY:  return C::GREEN;
-        case CmdCat::TRIG:
-        case CmdCat::MODE:   return C::CYAN;
-        case CmdCat::HYP:    return C::MAGENTA;
-        case CmdCat::STACK:  return std::string(C::BLUE) + C::BOLD;
-        case CmdCat::MEM:
-        case CmdCat::QUIT:   return std::string(C::RED) + C::BOLD;
-        case CmdCat::CONV:
-        case CmdCat::HIST:   return C::GRAY;
-        case CmdCat::HELP:   return std::string(C::WHITE) + C::BOLD;
-    }
-    return "";
-}
-
-std::string RPN::token_color(const std::string& tok) const {
-    auto it = registry.find(tok);
-    if (it == registry.end()) return "";
-    return cat_color(it->second.cat);
-}
-
-// Couleur d'un token incomplet : match exact, ou préfixe UNIQUE d'une
-// commande — permet de colorer dès la frappe, avant le délimiteur.
-// Préfixe ambigu ("si" → sin/sinh) → en clair jusqu'à désambiguïsation.
-std::string RPN::color_for_partial(const std::string& tok) const {
-    if (std::string col = token_color(tok); !col.empty()) return col;
-    const RegistryEntry* uniq = nullptr;
-    for (const auto& [name, e] : registry) {
-        if (name.rfind(tok, 0) == 0) {
-            if (uniq) return "";
-            uniq = &e;
+    // Pré-découpe : le « ; » collé (« 5;3+ », « 8 2/;p ») devient des
+    // tokens séparés avant l'analyse — le reste de la ligne ne saura
+    // jamais qu'ils étaient collés. Un octet « ; » (0x3B) n'existe dans
+    // aucune séquence UTF-8 : la découpe est sûre pour « x↔y » etc.
+    std::vector<std::string> toks;
+    {
+        std::istringstream iss(texte);
+        std::string mot;
+        while (iss >> mot) {
+            if (mot.find(';') == std::string::npos) {
+                toks.push_back(mot);
+                continue;
+            }
+            std::string piece;
+            for (char c : mot) {
+                if (c != ';') { piece += c; continue; }
+                if (!piece.empty()) { toks.push_back(piece); piece.clear(); }
+                toks.push_back(";");
+            }
+            if (!piece.empty()) toks.push_back(piece);
         }
     }
-    return uniq ? cat_color(uniq->cat) : "";
-}
 
-void RPN::print_colored_tokens(const std::string& line) const {
-    std::istringstream iss(line);
-    std::string tok;
-    bool first = true;
-    while (iss >> tok) {
-        if (!first) std::cout << ' ';
-        first = false;
-        std::string col = token_color(tok);
-        if (!col.empty()) std::cout << col << tok << C::RESET;
-        else std::cout << tok;
+    // Le séparateur « ; » solde un segment comme un retour chariot le
+    // ferait : écho du sommet, entrée d'historique propre, drapeau silent.
+    // Décisions (todo §12) : chaque segment a SA ligne d'historique ;
+    // « quit » clôt la ligne en cours de route (le reste de la ligne ne
+    // s'exécute pas) ; le duo « sto »/nom de variable traverse le
+    // séparateur sans se couper (machine à états inter-tokens).
+    const bool segmente = texte.find(';') != std::string::npos;
+    if (record_history && !segmente) {
+        // Chemin immuable d'origine : la ligne utile entière.
+        history.push_back(texte);
+        if (static_cast<int>(history.size()) > HIST_MAX)
+            history.erase(history.begin());
     }
-}
+    if (!segmente) {
+        for (const std::string& tok : toks) {
+            res.silent = process_token(tok, ctx, res.outputs);
+            if (debug_mode)
+                res.outputs.push_back(out_debug(trace_debug(tok, st)));
+            if (quit_requested) break;
+        }
+    } else {
+        std::string segment;             // tokens du segment courant, recollés
+        bool segment_display = false;     // le segment vient d'afficher lui-même
+        bool solde = false;              // le dernier segment est déjà soldé
+        auto enregistrer = [&](const std::string& contenu) {
+            if (!record_history || contenu.empty()) return;
+            history.push_back(contenu);
+            if (static_cast<int>(history.size()) > HIST_MAX)
+                history.erase(history.begin());
+        };
+        auto solder = [&]() {
+            solde = true;
+            if (segment.empty()) return;   // « ;; » : rien à solder de plus
+            enregistrer(segment);
+            // Écho du sommet, comme en fin de ligne — sauf si le segment
+            // vient d'en afficher un lui-même (stack, p, help…).
+            if (!segment_display && !st.empty())
+                res.outputs.push_back(out_value(st.back()));
+            segment.clear();
+            segment_display = false;
+        };
+        for (const std::string& tok : toks) {
+            if (tok == ";") {
+                if (!expect_var) solder();   // sto/rcl : « ; » traversant
+                continue;
+            }
+            solde = false;                   // nouveau token → segment ouvert
+            if (!segment.empty()) segment += ' ';
+            segment += tok;
+            segment_display = process_token(tok, ctx, res.outputs);
+            if (debug_mode)
+                res.outputs.push_back(out_debug(trace_debug(tok, st)));
+            if (quit_requested) break;  // quit clôt la ligne, le reste s'arrête
+        }
+        if (!segment.empty()) {
+            // Le segment final non soldé vit comme une ligne ordinaire.
+            enregistrer(segment);
+            res.silent = segment_display;
+        } else if (solde) {
+            // La ligne finit par « ; » : chaque écho a déjà eu lieu au
+            // séparateur — pas de double écho en fin de ligne.
+            res.silent = true;
+        }
+    }
 
-void RPN::colorize(const std::string& line) const {
-    if (line[0] == '!') { std::cout << line << "\n"; return; }
-    print_colored_tokens(line);
-    std::cout << "\n";
+    if (expect_var) {
+        res.outputs.push_back(out_err(T("sto/rcl requires a variable name")));
+        expect_var = false;
+    }
+    if (expect_file) {
+        res.outputs.push_back(out_err(T("run requires a file name")));
+        expect_file = false;
+    }
+    // Persistance explicite (todo §1) : le drapeau levé par la commande
+    // se joue ici, une fois par ligne — les fichiers et les messages
+    // appartiennent au moteur.
+    if (save_requested) {
+        save_requested = false;
+        save_variables();
+        res.outputs.push_back(out_msg(T("Variables saved in file")));
+    }
+    if (load_requested) {
+        load_requested = false;
+        load_variables();
+        res.outputs.push_back(out_msg(T("Variables reloaded")));
+    }
+    // hclear (todo §7) : l'historique vide, mémoire et fichier — la
+    // ligne courante reste dans l'historique nul, la suivante commence
+    // un historique neuf.
+    if (clear_hist_requested) {
+        clear_hist_requested = false;
+        history.clear();
+        save_history();
+        res.outputs.push_back(out_msg(T("history cleared")));
+    }
+
+    res.quit = quit_requested;
+    return res;
 }
 
 // ============================================================
 // Traitement d'un token
 // ============================================================
 
-bool RPN::process_token(const std::string& s, Context& ctx) {
-    if (handle_var_assignment(s)) return false;
+bool RPN::process_token(const std::string& s, Context& ctx, Outputs& outs) {
+    if (handle_var_assignment(s, outs)) return false;
+    // `run` armé : ce token est un chemin de fichier, pas une commande.
+    if (expect_file) {
+        expect_file = false;
+        return executer_run(s, outs);
+    }
     if (handle_precision(s)) return true;
     auto it = registry.find(s);
     if (it != registry.end()) {
         const Command* c = it->second.cmd.get();
         if (c->kind() == CommandKind::STO_RCL)
             var_is_store = static_cast<const StoRcl*>(c)->is_store();
-        c->exec(ctx);
+        Outputs produced = c->exec(ctx);
+        outs.insert(outs.end(), produced.begin(), produced.end());
         return c->is_display();
     }
-    return try_parse_number(s);
+    // Notation collée : « 5;3+ » (le ; découpé en amont), « 8 2/ »,
+    // « 12 5- » — des frappes sans Entrée, l'ordre postfixe est préservé.
+    if (s.size() >= 2) {
+        if (auto affiche = executer_colle(s, ctx, outs)) return *affiche;
+    }
+    return try_parse_number(s, outs);
 }
 
-bool RPN::handle_var_assignment(const std::string& s) {
+// ============================================================
+// Notation collée — atomes nombre/commande, frappes sans Entrée
+// ============================================================
+
+std::optional<bool> RPN::executer_colle(const std::string& s, Context& ctx, Outputs& outs) {
+    // Vrai quand le token se lit entièrement comme un nombre — le tiret
+    // collé qui suit un tel atome est alors le « - » arithmétique.
+    auto est_nombre = [](const std::string& t) {
+        double v = 0.0;
+        auto [p, ec] = std::from_chars(t.data(), t.data() + t.size(), v);
+        return ec == std::errc{} && p == t.data() + t.size();
+    };
+
+    // Phase d'analyse pure : rien ne s'exécute si la découpe échoue —
+    // l'erreur « commande inconnue » canonique reste à l'appelant.
+    std::vector<std::string> atomes;
+    std::string reste = s;
+    bool apres_nombre = false;
+    while (!reste.empty()) {
+        size_t coupe = 0;
+        if (apres_nombre && reste[0] == '-') {
+            coupe = 1;   // le tiret collé après un nombre soustrait (règle §12)
+        } else {
+            // la commande enregistrée qui préfixe le reste — la plus
+            // longue gagne ; jamais sto/rcl : leur nom de variable
+            // doit rester un token à part.
+            size_t nom = 0;
+            for (const auto& [cle, entree] : registry) {
+                if (entree.cmd->kind() == CommandKind::STO_RCL) continue;
+                if (cle.size() > nom && reste.compare(0, cle.size(), cle) == 0) {
+                    nom = cle.size();
+                }
+            }
+            // le nombre le plus long : from_chars dit où il s'arrête
+            size_t num = 0;
+            double v = 0.0;
+            auto [p, ec] = std::from_chars(reste.data(), reste.data() + reste.size(), v);
+            if (p != reste.data()) num = static_cast<size_t>(p - reste.data());
+            coupe = std::max(nom, num);
+        }
+        if (coupe == 0) return std::nullopt;
+        std::string atome = reste.substr(0, coupe);
+        apres_nombre = est_nombre(atome);
+        atomes.push_back(atome);
+        reste = coupe < reste.size() ? reste.substr(coupe) : "";
+    }
+    // Un seul atome = le token entier (nombre pur collé de rien) : ce
+    // n'est pas du collage — le traitement normal du token reprend, sinon
+    // la récursion atomes↔process_token ne s'arrêterait jamais.
+    if (atomes.size() < 2) return std::nullopt;
+
+    bool affichage = false;
+    for (const std::string& atome : atomes) {
+        affichage = process_token(atome, ctx, outs);
+        if (quit_requested) break;   // quit clôt la ligne, même collé
+    }
+    return affichage;
+}
+
+// ============================================================
+// run <fichier> — le script vit comme des frappes (todo §3)
+// ============================================================
+
+bool RPN::executer_run(const std::string& chemin, Outputs& outs) {
+    // Un script qui se run lui-même bouclerait : la profondeur est
+    // plafonnée (un run dans un run dans un run… reste humain).
+    if (run_depth >= 16) {
+        outs.push_back(out_err(T("run: nesting too deep")));
+        return true;
+    }
+    std::ifstream f(chemin);
+    if (!f) {
+        char buf[512];
+        std::snprintf(buf, sizeof buf, T("Cannot open file: %s"), chemin.c_str());
+        outs.push_back(out_err(buf));
+        return true;
+    }
+
+    // L'annonce précède l'exécution : les échos des lignes suivent, le
+    // dernier résultat reste la dernière ligne visible.
+    std::vector<std::string> lignes;
+    int compte = 0;
+    {
+        std::string ligne;
+        while (std::getline(f, ligne)) {
+            if (sans_commentaires(ligne).find_first_not_of(" \t") == std::string::npos)
+                continue;                       // ligne vide ou tout-commentaire
+            ++compte;
+            lignes.push_back(ligne);
+        }
+    }
+    char buf[512];
+    std::snprintf(buf, sizeof buf, T("run: %s — %d lines"),
+                  chemin.c_str(), compte);
+    outs.push_back(out_msg(buf));
+
+    // Politique d'erreur (todo §3, décision) : on CONTINUE — chaque ligne
+    // rapporte ses erreurs comme une frappe, la suivante s'exécute. `quit`
+    // dans le script arrête tout, comme une frappe.
+    ++run_depth;
+    for (const std::string& ligne : lignes) {
+        LineResult r = process_line(ligne, true);
+        outs.insert(outs.end(), r.outputs.begin(), r.outputs.end());
+        // L'écho de fin de ligne des frappes : le script l'a aussi.
+        if (!r.silent && !st.empty()) outs.push_back(out_value(st.back()));
+        if (r.quit || quit_requested) break;
+    }
+    --run_depth;
+    return true;   // run est une commande d'affichage : pas d'écho final dupliqué
+}
+
+bool RPN::handle_var_assignment(const std::string& s, Outputs& outs) {
     if (!expect_var) return false;
     var_name = s;
     if (var_is_store) {
-        if (st.empty()) print_err(std::string(T("Stack is empty")) + " (sto)");
-        else { mem[var_name] = st.back(); st.pop_back(); }
+        if (st.empty()) {
+            outs.push_back(out_err(std::string(T("Stack is empty")) + " (sto)"));
+        } else {
+            mem[var_name] = st.back();
+            st.pop_back();
+        }
     } else {
         auto it = mem.find(var_name);
         if (it != mem.end()) st.push_back(it->second);
@@ -372,7 +594,7 @@ bool RPN::handle_precision(const std::string& s) {
     return true;
 }
 
-bool RPN::try_parse_number(const std::string& s) {
+bool RPN::try_parse_number(const std::string& s, Outputs& outs) {
     // Entier plein → exact (BigInt) ; sinon double (point, exposant…)
     if (BigInt::looks_like_integer(s)) {
         st.push_back(Value::big(BigInt::from_str(s)));
@@ -381,7 +603,7 @@ bool RPN::try_parse_number(const std::string& s) {
     double v = 0.0;
     auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), v);
     if (ec != std::errc{} || ptr != s.data() + s.size()) {
-        print_err(std::string(T("Unknown command")) + ": " + s);
+        outs.push_back(out_err(std::string(T("Unknown command")) + ": " + s));
         return false;
     }
     st.push_back(Value::num(v));
@@ -389,80 +611,35 @@ bool RPN::try_parse_number(const std::string& s) {
 }
 
 // ============================================================
-// Lecture interactive (flèches, historique)
+// Pile — aide pour les front-ends
 // ============================================================
 
-bool RPN::read_line_interactive(std::string& out) {
-    out.clear();
-    int hist_idx = -1;
-    std::string saved;
+std::optional<Value> RPN::pop_top() {
+    if (st.empty()) return std::nullopt;
+    Value v = st.back();
+    st.pop_back();
+    return v;
+}
 
-    struct termios oldt, newt;
-    tcgetattr(STDIN_FILENO, &oldt);
-    newt = oldt;
-    newt.c_lflag &= ~(ICANON | ECHO);
-    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+// ============================================================
+// Recherche registre
+// ============================================================
 
-    bool ok = true;
-    while (true) {
-        int c = read_char_raw();
-        if (c == -1) { save_history(); save_variables(); ok = false; break; }
-        if (c == '\n') { recolor_last_token(out); break; }
-        if (c == 127 || c == 8) {
-            if (!out.empty()) { out.pop_back(); std::cout << "\b \b" << std::flush; recolor_last_token(out); }
-        } else if (c == 27) {
-            int c2 = read_char_raw(); if (c2 == -1) { ok = false; break; }
-            if (c2 == '[') {
-                int c3 = read_char_raw(); if (c3 == -1) { ok = false; break; }
-                if (c3 == 'A' && !history.empty()) {
-                    if (hist_idx == -1) { saved = out; hist_idx = static_cast<int>(history.size()) - 1; }
-                    else if (hist_idx > 0) --hist_idx;
-                    replace_line(out, history[static_cast<size_t>(hist_idx)]);
-                } else if (c3 == 'B' && hist_idx >= 0) {
-                    ++hist_idx;
-                    if (hist_idx >= static_cast<int>(history.size())) { hist_idx = -1; replace_line(out, saved); }
-                    else replace_line(out, history[static_cast<size_t>(hist_idx)]);
-                }
-            }
-        } else if (c == ' ') {
-            // Fin de token : on le recolore si c'est une commande connue
-            recolor_last_token(out);
-            out += ' ';
-            std::cout << ' ' << std::flush;
-        } else if (c >= 32) {
-            out += static_cast<char>(c);
-            std::cout << static_cast<char>(c) << std::flush;
-            recolor_last_token(out);
+const RegistryEntry* RPN::lookup(const std::string& name) const {
+    auto it = registry.find(name);
+    return it == registry.end() ? nullptr : &it->second;
+}
+
+std::optional<CmdCat> RPN::category_for_partial(const std::string& tok) const {
+    if (const RegistryEntry* e = lookup(tok)) return e->cat;
+    const RegistryEntry* uniq = nullptr;   // préfixe unique d'une seule commande ?
+    for (const auto& [name, e] : registry) {
+        if (name.rfind(tok, 0) == 0) {
+            if (uniq) return std::nullopt;   // ambigu : « si » → sin/sinh
+            uniq = &e;
         }
     }
-
-    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-    return ok;
-}
-
-void RPN::replace_line(std::string& field, const std::string& val) {
-    while (!field.empty()) { field.pop_back(); std::cout << "\b \b"; }
-    field = val;
-    print_colored_tokens(field);
-    std::cout << std::flush;
-}
-
-// Réécrit à l'écran le token en cours de frappe avec sa couleur du moment :
-// couleur de sa catégorie (match exact ou préfixe unique), sinon en clair.
-void RPN::recolor_last_token(const std::string& buf) const {
-    if (!use_color) return;
-    size_t start = buf.find_last_of(' ');
-    start = (start == std::string::npos) ? 0 : start + 1;
-    std::string tok = buf.substr(start);
-    if (tok.empty()) return;
-    std::string col = color_for_partial(tok);
-    for (size_t i = 0; i < tok.size(); ++i) std::cout << '\b';
-    std::cout << col << tok << C::RESET << std::flush;
-}
-
-int RPN::read_char_raw() {
-    unsigned char c{};
-    return read(STDIN_FILENO, &c, 1) == 1 ? static_cast<int>(c) : -1;
+    return uniq ? std::make_optional(uniq->cat) : std::nullopt;
 }
 
 // ============================================================
@@ -479,16 +656,16 @@ void RPN::reg(const std::string& name, CmdCat cat, const Command* cmd) {
 // Persistance disque
 // ============================================================
 
-void RPN::ensure_data_dir() { std::filesystem::create_directories(DATA_DIR); }
+void RPN::ensure_data_dir() { std::filesystem::create_directories(data_dir); }
 
 void RPN::save_history() {
     ensure_data_dir();
-    std::ofstream f(HIST_FILE);
+    std::ofstream f(hist_file());
     for (auto& h : history) f << h << "\n";
 }
 
 void RPN::load_history() {
-    std::ifstream f(HIST_FILE);
+    std::ifstream f(hist_file());
     std::string line;
     while (std::getline(f, line))
         if (!line.empty() && static_cast<int>(history.size()) < HIST_MAX)
@@ -497,27 +674,111 @@ void RPN::load_history() {
 
 void RPN::save_variables() {
     ensure_data_dir();
-    std::ofstream f(VAR_FILE);
-    // max_digits10 : nombre minimal de chiffres garantissant l'aller-retour
-    // exact d'un double (17) — la précision par défaut (6) tronquait les valeurs.
-    f << std::setprecision(std::numeric_limits<double>::max_digits10);
+    std::ofstream f(var_file());
+    f << "{\n";
+    bool premier = true;
     for (auto& [k, v] : mem) {
-        // marqueur de type : b = BigInt exact, d = double
-        if (v.is_big()) f << k << " b " << v.bi->to_string() << "\n";
-        else            f << k << " d " << v.d << "\n";
+        if (!premier) f << ",\n";
+        premier = false;
+        // JSON (todo §2) : le type voyage avec la valeur — chaîne décimale
+        // exacte pour un BigInt ; pour un double, to_chars rend la plus
+        // courte écriture qui fait l'aller-retour exact (%.17g ne suffit
+        // pas : %g élague les zéros, un digit peut manquer).
+        std::string valeur;
+        if (v.is_big()) {
+            valeur = v.bi->to_string();
+        } else {
+            std::array<char, 32> buf{};
+            auto [p, ec] = std::to_chars(buf.data(), buf.data() + buf.size(), v.d);
+            valeur = std::string(buf.data(), p);
+        }
+        f << "  " << json_chaine(k) << ": {\"type\": \""
+          << (v.is_big() ? 'b' : 'd') << "\", \"value\": " << json_chaine(valeur)
+          << "}";
     }
+    if (!premier) f << "\n";
+    f << "}\n";
+}
+
+bool RPN::charger_variables_json(const std::string& contenu) {
+    // Notre propre JSON, simple et strict : des paires « clé : { "type":
+    // "b|d", "value": "…" } ». Tout écart → faux : l'appelant retombe sur
+    // l'ancien format texte (rétrocompatibilité).
+    LecteurJson j{contenu};
+    auto cle = [&]() -> std::optional<std::string> {
+        j.blancs();
+        if (!j.prend('"')) return std::nullopt;
+        std::string out;
+        while (j.i < contenu.size() && contenu[j.i] != '"') {
+            if (contenu[j.i] == '\\' && j.i + 1 < contenu.size()) ++j.i;
+            out += contenu[j.i++];
+        }
+        if (!j.prend('"')) return std::nullopt;
+        return out;
+    };
+    j.blancs();
+    if (!j.prend('{')) return false;
+    j.blancs();
+    if (j.prend('}')) return true;   // fichier vide {} : rien à charger
+    while (true) {
+        auto nom = cle();
+        if (!nom) return false;
+        if (!j.prend(':') || !j.prend('{')) return false;
+        std::string type, valeur;
+        bool bon_type = false, bon_poids = false;
+        while (true) {
+            auto champ = cle();
+            if (!champ || (*champ != "type" && *champ != "value"))
+                return false;
+            if (!j.prend(':')) return false;
+            auto contenu_champ = cle();
+            if (!contenu_champ) return false;
+            if (*champ == "type") { type = *contenu_champ; bon_type = true; }
+            else                  { valeur = *contenu_champ; bon_poids = true; }
+            if (j.prend(',')) continue;
+            if (!j.prend('}')) return false;
+            break;
+        }
+        if (!bon_type || !bon_poids) return false;
+        if (type == "b") {
+            if (!BigInt::looks_like_integer(valeur)) return false;
+            mem[*nom] = Value::big(BigInt::from_str(valeur));
+        } else if (type == "d") {
+            double d = 0.0;
+            auto [p, ec] = std::from_chars(valeur.data(),
+                                           valeur.data() + valeur.size(), d);
+            if (ec != std::errc{} || p != valeur.data() + valeur.size())
+                return false;
+            mem[*nom] = Value::num(d);
+        } else {
+            return false;
+        }
+        if (j.prend(',')) continue;
+        if (!j.prend('}')) return false;
+        break;
+    }
+    j.blancs();
+    return j.i >= contenu.size();
 }
 
 void RPN::load_variables() {
-    std::ifstream f(VAR_FILE);
+    std::ifstream f(var_file());
+    if (!f) return;
+    std::stringstream buf;
+    buf << f.rdbuf();
+    const std::string contenu = buf.str();
+    // JSON d'abord (notre format) ; l'ancien texte « nom b|d valeur »
+    // reste lu tel quel — migration silencieuse au prochain save.
+    if (charger_variables_json(contenu)) return;
+    std::istringstream flux(contenu);
     std::string name, tag;
-    while (f >> name >> tag) {
+    while (flux >> name >> tag) {
         if (tag == "b") {
             std::string digits;
-            if (f >> digits) mem[name] = Value::big(BigInt::from_str(digits));
+            if (flux >> digits) mem[name] = Value::big(BigInt::from_str(digits));
         } else if (tag == "d") {
             double v;
-            if (f >> v) mem[name] = Value::num(v);
+            if (flux >> v) mem[name] = Value::num(v);
         } else {
             // ancien format sans marqueur : « nom valeur »
             double v = 0.0;
@@ -526,4 +787,14 @@ void RPN::load_variables() {
                 mem[name] = Value::num(v);
         }
     }
+}
+
+void RPN::save_state() {
+    save_history();
+    save_variables();
+}
+
+void RPN::load_state() {
+    load_history();
+    load_variables();
 }

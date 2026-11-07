@@ -57,6 +57,14 @@ No `clang++` or `g++`? You have bigger problems than this README can solve.
 echo "3 4 + 5 *" | ./rpn      # batch mode (it shuts up and calculates)
 ```
 
+Chaining? The `;` separator acts as a virtual Enter: each segment gets
+its own echo, its own history entry — `3 4 + ; 2 * ;` behaves exactly
+like three lines, on the strength of one keystroke. And nothing forces
+you to space: `5;3+` pushes 5, commits, then `3+` adds — `8 2/` divides,
+`2 10^`, `12 5-` subtract. Glued strokes are still postfix: a `-`
+right after a number subtracts (write the negative with a space, or
+`chs`), and `sto` keeps its variable name apart.
+
 In interactive mode you get a prompt worthy of a 1982 terminal:
 
 ```
@@ -119,6 +127,9 @@ rpn> 2 10 pow
 | `log` | Logarithm base b | `8 2 log` → `3` | — |
 | `mod` | Modulo | `10 3 mod` → `1` | `[R]` |
 | `atan2` | Arc tangent 2 args | `1 1 atan2` → `45` | — |
+| `pct` | x % of y (y stays) | `200 5 pct` → `10` | `[%]` |
+| `d%` | Δ% — change from y to x | `80 100 d%` → `25` | `[%CH]` |
+| `%t` | %T — x as a share of total y | `200 50 %t` → `25` | `[%T]` |
 
 ### Constants
 *Because typing 14 decimal places by hand is for people who enjoy suffering*
@@ -146,6 +157,10 @@ rpn> 2 10 pow
 | `round` | Round to nearest | — |
 | `trunc` | Truncate | — |
 | `fact` | Factorial | `[x!]` |
+
+The HP-15C keys are typeable too: `1/x` (`inv`), `chs` (`neg`), `e^x`
+(`exp`), `y^x` (`pow`) and `x↔y` / `x<>y` (`swap`) — same behavior, LAST
+X and BigInt exactness included.
 
 ### Trigonometry
 *For those who passed their exams in DEG mode, like the HP-15C by default*
@@ -195,6 +210,8 @@ every last bit of a bigint — exactly.
 | `dup` | Duplicate top | `[ENTER]` |
 | `drop` | Drop top | `[CLx]` |
 | `swap` | Swap top two | `[x↔y]` |
+| `lastx` | Push back LAST X — the x consumed by the last calculation (arith, unary, `~`, conversions, `m±`), kept even when operands are restored on error | `[LAST X]` |
+| `lstx` | Alias for `lastx` | — |
 | `clear` | Clear entire stack | — |
 | `stack` | Display numbered stack | — |
 | `ls` | Alias for `stack` | — |
@@ -264,7 +281,14 @@ speak the same stack.
 | `dec` | Decimal mode (default) |
 | `hex` | Hexadecimal mode |
 | `bin` | Binary mode |
+| `sci` | Scientific display — mantissa `[1,10)` × 10ⁿ (`12345` → `1.2345e+4`) |
+| `eng` | Engineering display — mantissa `[1,1000)` × 10³ᵏ (`0.0123` → `12.3e-3`) |
 | `visual` | Show full stack after each calculation |
+
+Scientific **input** needs no mode: `1.5e3` → `1500`, `1e-2` → `0.01` —
+the `[EEX]` key of the HP-15C, everywhere a number can be typed. `sci`
+and `eng` promote BigInt values to double for display (arithmetic stays
+exact in `dec`).
 
 ### Configurable Precision
 *Want 3 digits? 15? 0? It's your world. The HP-15C gave you 10.
@@ -296,9 +320,20 @@ rpn> .0 12345
 | `h` | Show history |
 | `hist` | Alias for `h` |
 | `history` | Alias for `h` |
+| `hclear` | Clear history (alias `histclear`) |
 
-In interactive mode, **Up/Down arrows** navigate history.
+In interactive mode, **Up/Down arrows** navigate history — and
+**Ctrl-R searches it backwards**: type a fragment, each keystroke jumps
+to the most recent match, Ctrl-R again goes one older, Enter runs the
+match, Esc gets you back to typing.
 It's like a tape drive, but better.
+
+### Debug mode
+*When the stack misbehaves, watch it move.* `debug` toggles a trace —
+after **each token**, the full stack, prefixed `[DEBUG]`; errors show
+the stack exactly as the failing token saw it. It works in scripts and
+batch too, and `--debug` starts the session in debug. The HP-15C gave
+you one blinking ERR. We give you the whole machine.
 
 ### Shell Escape
 *When you need a little Unix in your RPN.
@@ -357,7 +392,7 @@ Data is saved automatically in `.rpn_data/`:
 ```
 .rpn_data/
 ├── historique.txt    Your commands (MAX 1024 — more than the HP-15C had)
-└── variables.txt     Your named variables
+└── variables.txt     Your named variables — JSON
 ```
 
 It's like the HP-15C's non-volatile memory, except it lives on a hard
@@ -365,6 +400,26 @@ disk instead of a coin cell battery. And it survives everything —
 quit, Ctrl-D, even Ctrl-C mid-formula. The HP-15C saved your registers
 through power cuts; we save your history through your worst keyboard
 habits. Same philosophy, better insurance.
+
+Variables live in JSON (BigInt exactness rides along, doubles come back
+digit-for-digit), and the old plain-text format still loads — a legacy
+file migrates on the next save.
+
+On top of the automatic save, `save` / `load` (aliases `savevar` /
+`loadvar`) do it on demand — and scripts run like keystrokes:
+
+```
+rpn> save              # write variables now
+rpn> run stats.rpn     # execute a file, line by line, errors don't stop it
+rpn> 8 2/ # comments   # « # » and « // » cut the rest of the line
+```
+
+Without the prompt, it's arguments — the stack flows from one file to
+the next:
+
+```sh
+./rpn setup.rpn loop.rpn
+```
 
 To wipe everything:
 
@@ -572,6 +627,14 @@ que ce README ne peut résoudre.
 echo "3 4 + 5 *" | ./rpn      # mode batch (il se tait et calcule)
 ```
 
+Chaîner ? Le séparateur « ; » fait office d'Entrée virtuelle : chaque
+segment a son écho et sa propre entrée d'historique — `3 4 + ; 2 * ;`
+se comporte exactement comme trois lignes, pour une seule frappe finale.
+Et rien n'oblige à espacer : `5;3+` empile 5, solde, puis `3+` additionne —
+`8 2/` divise, `2 10^`, `12 5-` soustrait. Les frappes collées restent
+postfixes : un `-` collé derrière un nombre soustrait (le négatif
+s'écrit espacé, ou `chs`), et `sto` garde son nom de variable à part.
+
 En mode interactif, vous obtenez un prompt digne d'un terminal de 1982 :
 
 ```
@@ -637,6 +700,9 @@ Vous trouvez ça bizarre ? Attendez de voir les hyperboliques.
 | `log` | Logarithme base b | `8 2 log` → `3` | — |
 | `mod` | Modulo | `10 3 mod` → `1` | `[R]` |
 | `atan2` | Arc tangente 2 args | `1 1 atan2` → `45` | — |
+| `pct` | x % de y (y reste sur la pile) | `200 5 pct` → `10` | `[%]` |
+| `d%` | Δ% — variation de y à x | `80 100 d%` → `25` | `[%CH]` |
+| `%t` | %T — part de x dans le total y | `200 50 %t` → `25` | `[%T]` |
 
 ### Constantes
 *Parce que taper 14 décimales à la main, c'est pour les amateurs de labeur*
@@ -664,6 +730,10 @@ Vous trouvez ça bizarre ? Attendez de voir les hyperboliques.
 | `round` | Arrondi au plus proche | — |
 | `trunc` | Troncature | — |
 | `fact` | Factorielle | `[x!]` |
+
+Les touches HP-15C se tapent aussi : `1/x` (`inv`), `chs` (`neg`), `e^x`
+(`exp`), `y^x` (`pow`) et `x↔y` / `x<>y` (`swap`) — même comportement,
+LAST X et exactitude BigInt comprises.
 
 ### Trigonométrie
 *Pour ceux qui ont passé leur bac en mode DEG, comme la HP-15C par défaut*
@@ -713,6 +783,8 @@ entiers en double de façon transparente. `fact` plafonne à 1000.
 | `dup` | Duplique le sommet | `[ENTER]` |
 | `drop` | Jette le sommet | `[CLx]` |
 | `swap` | Échange les deux premiers | `[x↔y]` |
+| `lastx` | Rappelle LAST X — le x consommé par le dernier calcul (arithmétique, unaire, `~`, conversions, `m±`), conservé même quand les opérandes sont restaurées après erreur | `[LAST X]` |
+| `lstx` | Alias de `lastx` | — |
 | `clear` | Vide toute la pile | — |
 | `stack` | Affiche la pile numérotée | — |
 | `ls` | Alias de `stack` | — |
@@ -783,7 +855,14 @@ C'est plus classe.*
 | `dec` | Mode décimal (défaut) |
 | `hex` | Mode hexadécimal |
 | `bin` | Mode binaire |
+| `sci` | Affichage scientifique — mantisse `[1,10)` × 10ⁿ (`12345` → `1.2345e+4`) |
+| `eng` | Affichage ingénieur — mantisse `[1,1000)` × 10³ᵏ (`0.0123` → `12.3e-3`) |
 | `visual` | Affiche la pile complète après chaque calcul |
+
+La **saisie** scientifique n'exige aucun mode : `1.5e3` → `1500`, `1e-2`
+→ `0.01` — la touche `[EEX]` de la HP-15C, partout où un nombre se tape.
+`sci` et `eng` promeuvent les BigInt en double pour l'affichage
+(le calcul, lui, reste exact en `dec`).
 
 ### Précision configurable
 *Vous voulez 3 chiffres ? 15 ? 0 ? C'est votre monde. La HP-15C
@@ -815,9 +894,21 @@ rpn> .0 12345
 | `h` | Affiche l'historique |
 | `hist` | Alias de `h` |
 | `history` | Alias de `h` |
+| `hclear` | Vide l'historique (alias `histclear`) |
 
-En mode interactif, les **flèches Haut/Bas** naviguent dans l'historique.
+En mode interactif, les **flèches Haut/Bas** naviguent dans l'historique
+— et **Ctrl-R le fouille à rebours** : tapez un fragment, chaque frappe
+saute au match le plus récent, Ctrl-R encore passe au plus ancien,
+Entrée exécute le match, Échap reprend la frappe.
 C'est comme un défileur magnétique, mais en mieux.
+
+### Mode debug
+*Quand la pile joue les morfales, regardez-la bouger.* `debug` bascule
+une trace — après **chaque token**, la pile entière, préfixée
+`[DEBUG]` ; en erreur, la pile est montrée exactement comme le token
+fautif l'a vue. Ça marche aussi dans les scripts et le batch, et
+`--debug` démarre la session en debug. La HP-15C vous donnait un ERR
+clignotant. Nous, on vous donne toute la machine.
 
 ### Échappement shell
 *Quand vous avez besoin d'un peu de Unix dans votre RPN.
@@ -877,7 +968,7 @@ Les données sont sauvegardées automatiquement dans `.rpn_data/` :
 ```
 .rpn_data/
 ├── historique.txt    Vos commandes (MAX 1024 — c'est plus que la HP-15C)
-└── variables.txt     Vos variables nommées
+└── variables.txt     Vos variables nommées — en JSON
 ```
 
 C'est comme la mémoire non-volatile de la HP-15C, sauf que ça tient
@@ -886,6 +977,26 @@ quit, Ctrl-D, même Ctrl-C en pleine formule. La HP-15C sauvegardait
 vos registres à travers les coupures de courant ; nous, on sauvegarde
 votre historique à travers vos pires habitudes de clavier. Même
 philosophie, meilleure assurance.
+
+Les variables vivent en JSON (l'exactitude BigInt voyage, les doubles
+reviennent chiffre pour chiffre) — et l'ancien format texte se relit
+toujours : il migre au prochain save.
+
+Par-dessus la sauvegarde automatique, `save` / `load` (alias `savevar` /
+`loadvar`) le font à la demande — et les scripts vivent comme des frappes :
+
+```
+rpn> save              # écrire les variables maintenant
+rpn> run stats.rpn     # exécuter un fichier, ligne à ligne, les erreurs n'arrêtent rien
+rpn> 8 2/ # commentaire  « # » et « // » coupent la fin de ligne
+```
+
+Sans prompt, ce sont des arguments — la pile coule d'un fichier au
+suivant :
+
+```sh
+./rpn setup.rpn boucle.rpn
+```
 
 Pour tout effacer :
 
@@ -1102,6 +1213,14 @@ README puede resolver.
 echo "3 4 + 5 *" | ./rpn      # modo por lotes (se calla y calcula)
 ```
 
+¿Encadenar? El separador « ; » hace de Intro virtual: cada segmento
+tiene su eco y su propia entrada de historial — `3 4 + ; 2 * ;` se
+comporta exactamente como tres líneas, con una sola pulsación final.
+Y nada obliga a espaciar: `5;3+` apila 5, liquida, luego `3+` suma —
+`8 2/` divide, `2 10^`, `12 5-` resta. Las pulsaciones pegadas siguen
+siendo postfijas: un `-` pegado detrás de un número resta (el negativo
+se escribe espaciado, o `chs`), y `sto` mantiene su nombre de variable apart.
+
 En modo interactivo recibes un prompt digno de un terminal de 1982:
 
 ```
@@ -1166,6 +1285,9 @@ rpn> 2 10 pow
 | `log` | Logaritmo base b | `8 2 log` → `3` | — |
 | `mod` | Módulo | `10 3 mod` → `1` | `[R]` |
 | `atan2` | Arco tangente de 2 args | `1 1 atan2` → `45` | — |
+| `pct` | x % de y (y queda en la pila) | `200 5 pct` → `10` | `[%]` |
+| `d%` | Δ% — variación de y a x | `80 100 d%` → `25` | `[%CH]` |
+| `%t` | %T — parte de x en el total y | `200 50 %t` → `25` | `[%T]` |
 
 ### Constantes
 *Porque escribir 14 decimales a mano es cosa de amantes del trabajo duro*
@@ -1193,6 +1315,10 @@ rpn> 2 10 pow
 | `round` | Redondeo al más próximo | — |
 | `trunc` | Truncamiento | — |
 | `fact` | Factorial | `[x!]` |
+
+Las teclas de la HP-15C también se pueden escribir: `1/x` (`inv`),
+`chs` (`neg`), `e^x` (`exp`), `y^x` (`pow`) y `x↔y` / `x<>y` (`swap`) —
+mismo comportamiento, con LAST X y exactitud BigInt incluidas.
 
 ### Trigonometría
 *Para los que aprobaron el examen en modo DEG, como la HP-15C por defecto*
@@ -1262,6 +1388,8 @@ no — ambas notaciones hablan la misma pila.
 | `dup` | Duplica la cima | `[ENTER]` |
 | `drop` | Elimina la cima | `[CLx]` |
 | `swap` | Intercambia los dos primeros | `[x↔y]` |
+| `lastx` | Devuelve LAST X — la x consumida por el último cálculo (aritmética, unaria, `~`, conversiones, `m±`), conservada incluso cuando los operandos se restauran tras un error | `[LAST X]` |
+| `lstx` | Alias de `lastx` | — |
 | `clear` | Vacía toda la pila | — |
 | `stack` | Muestra la pila numerada | — |
 | `ls` | Alias de `stack` | — |
@@ -1312,7 +1440,14 @@ Más elegante.*
 | `dec` | Modo decimal (por defecto) |
 | `hex` | Modo hexadecimal |
 | `bin` | Modo binario |
+| `sci` | Visualización científica — mantisa `[1,10)` × 10ⁿ (`12345` → `1.2345e+4`) |
+| `eng` | Visualización de ingeniero — mantisa `[1,1000)` × 10³ᵏ (`0.0123` → `12.3e-3`) |
 | `visual` | Muestra la pila completa tras cada cálculo |
+
+La **entrada** en notación científica no necesita modo: `1.5e3` → `1500`,
+`1e-2` → `0.01` — la tecla `[EEX]` de la HP-15C, donde sea que se escriba
+un número. `sci` y `eng` promueven los BigInt a double para mostrarlos
+(el cálculo sigue exacto en `dec`).
 
 ### Precisión configurable
 *¿Quieres 3 dígitos? ¿15? ¿0? Es tu mundo. La HP-15C te daba 10.
@@ -1344,9 +1479,21 @@ rpn> .0 12345
 | `h` | Muestra el historial |
 | `hist` | Alias de `h` |
 | `history` | Alias de `h` |
+| `hclear` | Vacía el historial (alias `histclear`) |
 
 En modo interactivo, las **flechas de arriba/abajo** navegan por el
-historial. Como una cinta magnética, pero mejor.
+historial — y **Ctrl-R lo rastrea hacia atrás**: escribe un fragmento,
+cada pulsación salta al match más reciente, otro Ctrl-R pasa al más
+antiguo, Intro ejecuta el match, Esc vuelve a escribir.
+Como una cinta magnética, pero mejor.
+
+### Modo de depuración
+*Cuando la pila hace la mahoma, mírala moverse.* `debug` conmuta una
+traza — tras **cada token**, la pila entera, prefijada `[DEBUG]`; en
+caso de error, la pila se muestra exactamente como la vio el token
+culpable. También funciona en guiones y por lotes, y `--debug` arranca
+la sesión en depuración. La HP-15C te daba un ERR parpadeante.
+Nosotros te damos toda la máquina.
 
 ### Escape al shell
 *Cuando necesitas un poco de Unix en tu RPN.
@@ -1406,7 +1553,7 @@ Los datos se guardan automáticamente en `.rpn_data/`:
 ```
 .rpn_data/
 ├── historique.txt    Tus comandos (MÁX 1024 — más de los que tuvo la HP-15C)
-└── variables.txt     Tus variables con nombre
+└── variables.txt     Tus variables con nombre — en JSON
 ```
 
 Es como la memoria no volátil de la HP-15C, salvo que vive en un disco
@@ -1414,6 +1561,25 @@ duro y no en una pila de botón. Y sobrevive a todo — quit, Ctrl-D,
 incluso Ctrl-C en plena fórmula. La HP-15C salvaba tus registros a
 través de los cortes de luz; nosotros salvamos tu historial a través
 de tus peores vicios de teclado. Misma filosofía, mejor seguro.
+
+Las variables viven en JSON (la exactitud BigInt viaja, los doubles
+vuelven dígito a dígito) — y el antiguo formato de texto se sigue
+leyendo: migra en el próximo save.
+
+Encima del guardado automático, `save` / `load` (alias `savevar` /
+`loadvar`) lo hacen a demanda — y los guiones viven como pulsaciones:
+
+```
+rpn> save              # escribir las variables ahora
+rpn> run stats.rpn     # ejecutar un archivo, línea a línea, los errores no detienen nada
+rpn> 8 2/ # comentario  « # » y « // » cortan el final de línea
+```
+
+Sin prompt, son argumentos — la pila fluye de un archivo al siguiente:
+
+```sh
+./rpn setup.rpn bucle.rpn
+```
 
 Para borrarlo todo:
 
